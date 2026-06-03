@@ -34,9 +34,14 @@ COPY ./e2e-tests/pom.xml ./e2e-tests/pom.xml
 COPY ./query/pom.xml ./query/pom.xml
 COPY ./synthea-hiv/pom.xml ./synthea-hiv/pom.xml
 
+# Set to true to skip the unit tests during the image build (e.g. in CI, where
+# tests have already run in a separate job). Defaults to false so local
+# `docker build` keeps running the full suite.
+ARG SKIP_TESTS=false
+
 # Updating license will fail in e2e and there is no point doing it here anyways.
 # Note this build can be faster by excluding some uber-jars we don't copy.
-RUN mvn --no-transfer-progress --batch-mode clean package -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
+RUN mvn --no-transfer-progress --batch-mode clean package -DskipTests=${SKIP_TESTS} -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
 
 FROM eclipse-temurin:17-jdk-focal as main
 
