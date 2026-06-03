@@ -1,6 +1,11 @@
 name: Python Code Quality
 
-on: [push, pull_request]
+# Scope push to master so PR-branch pushes don't fire twice (once for push,
+# once for pull_request); PRs are still covered by the pull_request trigger.
+on:
+  push:
+    branches: [master]
+  pull_request:
 
 jobs:
   lint:
