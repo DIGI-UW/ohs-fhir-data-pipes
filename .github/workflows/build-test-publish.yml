@@ -1,11 +1,11 @@
-# Builds and unit-tests the Java project, and publishes the pipeline-controller
-# image to Docker Hub. Build + test run on every push and PR; the image is
-# published only on push to master and on manual dispatch.
+# Builds and unit-tests the Java project and the controller image on every push
+# and PR. The image is pushed to Docker Hub only on master (push or manual
+# dispatch, both of which run against the master ref); PR builds build the image
+# but skip the push.
 #
 # Uses the DIGI-UW org Docker Hub credentials (vars.DOCKERHUB_USERNAME +
-# secrets.DOCKERHUB_TOKEN), matching the convention in OpenELIS-Global-2. The
-# image namespace follows vars.DOCKERHUB_USERNAME, so the image is
-# <DOCKERHUB_USERNAME>/ohs-fhir-data-pipes-controller.
+# secrets.DOCKERHUB_TOKEN), matching OpenELIS-Global-2. The image namespace
+# follows DOCKERHUB_USERNAME: <DOCKERHUB_USERNAME>/ohs-fhir-data-pipes-controller.
 name: Build, Test and Publish
 
 on:
@@ -15,8 +15,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-test:
-    name: Build and unit test (JDK 17)
+  build-test-publish:
+    name: Build, test, and publish (JDK 17)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,43 +32,15 @@ jobs:
       # license + spotless are skipped to match cloudbuild.yaml and the
       # Dockerfile build stage (license needs full .git context, spotless needs
       # an NPM/prettier toolchain not provisioned here).
-      - name: Install dependencies (no tests)
-        run: >
-          mvn install -DskipTests=true -Dlicense.skip=true
-          -Dspotless.apply.skip=true -Dmaven.javadoc.skip=true -B -V
-          --no-transfer-progress
-
-      - name: Run unit tests
-        run: >
-          mvn -B test -Dlicense.skip=true -Dspotless.apply.skip=true
-          --no-transfer-progress
-
-      - name: Upload Surefire reports on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: surefire-reports
-          path: '**/target/surefire-reports/**'
-          if-no-files-found: ignore
-
-  build-image:
-    name: Build controller image (push on master)
-    needs: build-test
-    runs-on: ubuntu-latest
-    # The image is BUILT on every PR (so a broken Dockerfile fails the PR), but
-    # PUSHED to Docker Hub only on master pushes and manual dispatch.
-    env:
-      SHOULD_PUSH: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Build and unit test
+        run: |
+          mvn install -DskipTests=true -Dlicense.skip=true -Dspotless.apply.skip=true -Dmaven.javadoc.skip=true -B -V --no-transfer-progress
+          mvn -B test -Dlicense.skip=true -Dspotless.apply.skip=true --no-transfer-progress
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Only authenticate when we intend to push; PR builds don't need creds.
       - name: Log in to Docker Hub
-        if: env.SHOULD_PUSH == 'true'
         uses: docker/login-action@v4
         with:
           registry: docker.io
@@ -85,14 +57,14 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=ref,event=branch
 
-      # Tests already ran in build-test; skip them in the image build.
-      # push is gated: build-only on PRs, build+push on master/dispatch.
-      - name: Build (and push on master)
+      # Tests already ran above; skip them in the image build. push is gated on
+      # the master ref, so PRs build the image but do not publish it.
+      - name: Build image (push on master)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ env.SHOULD_PUSH }}
+          push: ${{ github.ref == 'refs/heads/master' }}
           build-args: SKIP_TESTS=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
