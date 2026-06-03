@@ -28,9 +28,12 @@ import com.google.fhir.analytics.model.DatabaseConfiguration;
 import com.google.fhir.analytics.view.ViewDefinitionException;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -679,6 +682,40 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
     currentDwh = DwhFiles.forRootWithLatestViewPath(newRoot, avroConversionUtil.getFhirContext());
   }
 
+  /**
+   * Deletes {@code flink-rpc-akka_*.jar} files in {@code tmpDir} whose last-modified time is
+   * strictly before {@code cutoffMillis}. Flink's MiniCluster extracts a fresh copy of this plugin
+   * jar to the system temp directory on every pipeline run and does not clean it up on shutdown,
+   * causing unbounded disk growth. Using the pipeline-run start time as the cutoff preserves the
+   * jar extracted by the current run while removing all older copies.
+   *
+   * @return the number of files successfully deleted
+   */
+  @VisibleForTesting
+  static int cleanStaleFlinkRpcJars(Path tmpDir, long cutoffMillis) {
+    File[] staleJars =
+        tmpDir
+            .toFile()
+            .listFiles(
+                (dir, name) ->
+                    name.startsWith("flink-rpc-akka")
+                        && name.endsWith(".jar")
+                        && new File(dir, name).lastModified() < cutoffMillis);
+    if (staleJars == null) {
+      return 0;
+    }
+    int deleted = 0;
+    for (File jar : staleJars) {
+      if (jar.delete()) {
+        logger.info("Deleted stale Flink tmp jar: {}", jar.getName());
+        deleted++;
+      } else {
+        logger.warn("Could not delete stale Flink tmp jar: {}", jar.getName());
+      }
+    }
+    return deleted;
+  }
+
   private static class PipelineThread extends Thread {
     private FhirEtlOptions options;
     private final PipelineManager manager;
@@ -788,6 +825,10 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
       } finally {
         // See https://github.com/google/fhir-data-pipes/issues/777#issuecomment-1703142297
         System.gc();
+        String tmpDirProp = System.getProperty("java.io.tmpdir");
+        if (tmpDirProp != null) {
+          cleanStaleFlinkRpcJars(Paths.get(tmpDirProp), start);
+        }
         logger.info(
             "Total time taken for the pipelines = {} secs",
             (System.currentTimeMillis() - start) / 1000);

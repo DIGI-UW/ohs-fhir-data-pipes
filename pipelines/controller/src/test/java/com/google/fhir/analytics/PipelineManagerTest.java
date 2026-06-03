@@ -23,10 +23,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -112,5 +115,36 @@ public class PipelineManagerTest {
     // getNextIncrementalTime should return null
     LocalDateTime next = pipelineManager.getNextIncrementalTime();
     assertThat(next, is(nullValue()));
+  }
+
+  @Test
+  public void testCleanStaleFlinkRpcJars(@TempDir Path tmpDir) throws Exception {
+    long cutoff = System.currentTimeMillis();
+
+    // Stale jars (last-modified before cutoff) — should be deleted.
+    Path stale1 = tmpDir.resolve("flink-rpc-akka_aaa-111.jar");
+    Path stale2 = tmpDir.resolve("flink-rpc-akka_bbb-222.jar");
+    Files.createFile(stale1);
+    Files.createFile(stale2);
+    stale1.toFile().setLastModified(cutoff - 2000);
+    stale2.toFile().setLastModified(cutoff - 1000);
+
+    // Current run's jar (last-modified after cutoff) — must be preserved.
+    Path current = tmpDir.resolve("flink-rpc-akka_current.jar");
+    Files.createFile(current);
+    current.toFile().setLastModified(cutoff + 1000);
+
+    // Unrelated file (name does not match pattern) — must not be deleted.
+    Path unrelated = tmpDir.resolve("other-flink-file.jar");
+    Files.createFile(unrelated);
+    unrelated.toFile().setLastModified(cutoff - 1000);
+
+    int deleted = PipelineManager.cleanStaleFlinkRpcJars(tmpDir, cutoff);
+
+    assertThat(deleted, is(2));
+    assertThat(Files.exists(stale1), is(false));
+    assertThat(Files.exists(stale2), is(false));
+    assertThat(Files.exists(current), is(true));
+    assertThat(Files.exists(unrelated), is(true));
   }
 }
