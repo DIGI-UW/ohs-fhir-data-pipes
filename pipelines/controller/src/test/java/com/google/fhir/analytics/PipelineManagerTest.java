@@ -147,4 +147,27 @@ public class PipelineManagerTest {
     assertThat(Files.exists(current), is(true));
     assertThat(Files.exists(unrelated), is(true));
   }
+
+  @Test
+  public void testCleanStaleFlinkRpcJarsAtStartup(@TempDir Path tmpDir) throws Exception {
+    // Startup-sweep semantics: no pipeline is running yet, so with cutoff = now, all jars left
+    // behind by a previous JVM killed mid-run are stale and must be removed.
+    Path orphan1 = tmpDir.resolve("flink-rpc-akka_orphan-1.jar");
+    Path orphan2 = tmpDir.resolve("flink-rpc-akka_orphan-2.jar");
+    Path unrelated = tmpDir.resolve("other-flink-file.jar");
+    Files.createFile(orphan1);
+    Files.createFile(orphan2);
+    Files.createFile(unrelated);
+    long now = System.currentTimeMillis();
+    orphan1.toFile().setLastModified(now - 60_000);
+    orphan2.toFile().setLastModified(now - 1000);
+    unrelated.toFile().setLastModified(now - 60_000);
+
+    int deleted = PipelineManager.cleanStaleFlinkRpcJars(tmpDir, now);
+
+    assertThat(deleted, is(2));
+    assertThat(Files.exists(orphan1), is(false));
+    assertThat(Files.exists(orphan2), is(false));
+    assertThat(Files.exists(unrelated), is(true));
+  }
 }

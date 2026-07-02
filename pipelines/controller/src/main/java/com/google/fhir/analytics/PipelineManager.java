@@ -196,6 +196,16 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
   @PostConstruct
   private void initDwhStatus() throws ProfileException {
 
+    // Sweep flink-rpc-akka jars orphaned by a previous JVM that died mid-run (e.g., OOM-kill or
+    // container restart). Spring runs @PostConstruct before any @Scheduled or API-triggered
+    // pipeline can start, so every matching jar in the temp dir is stale at this point. This
+    // complements the post-run sweep in PipelineThread: in a crash loop where no run ever
+    // completes, the post-run sweep never executes but this one still bounds disk usage.
+    String tmpDirProp = System.getProperty("java.io.tmpdir");
+    if (tmpDirProp != null) {
+      cleanStaleFlinkRpcJars(Paths.get(tmpDirProp), System.currentTimeMillis());
+    }
+
     // Initialise the Flink configurations for all the pipelines
     initialiseFlinkConfiguration();
     avroConversionUtil =
@@ -684,10 +694,13 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
   /**
    * Deletes {@code flink-rpc-akka_*.jar} files in {@code tmpDir} whose last-modified time is
-   * strictly before {@code cutoffMillis}. Flink's MiniCluster extracts a fresh copy of this plugin
-   * jar to the system temp directory on every pipeline run and does not clean it up on shutdown,
-   * causing unbounded disk growth. Using the pipeline-run start time as the cutoff preserves the
-   * jar extracted by the current run while removing all older copies.
+   * strictly before {@code cutoffMillis}. Flink's MiniCluster extracts a fresh ~35 MiB copy of
+   * this plugin jar to the system temp directory on every pipeline run. Flink deletes it again on
+   * graceful MiniCluster shutdown (even for failed runs), but the copy is orphaned whenever the
+   * JVM dies mid-run (e.g., OOM-kill, container restart, host reboot); since the container
+   * filesystem survives restarts, these orphans accumulate until the disk fills. This method is
+   * called both after each pipeline run (cutoff = run start time, preserving the current run's
+   * jar) and at startup (cutoff = now; nothing can be running yet).
    *
    * @return the number of files successfully deleted
    */
