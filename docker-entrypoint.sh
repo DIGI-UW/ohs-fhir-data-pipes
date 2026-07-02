@@ -44,10 +44,16 @@ enable_jemalloc
 
 if [[ -z "$JAVA_OPTS" ]]; then
   echo "JAVA_OPTS is empty, initialising with default values"
-  JAVA_OPTS="-Xms6g -Xmx6g"
+  # Container-aware default: cap the heap at half of the memory visible to the
+  # JVM (the container limit when one is set, host RAM otherwise). The previous
+  # fixed default (-Xms6g -Xmx6g) made the kernel OOM-kill the controller
+  # mid-run wherever less than ~12 GB was available: RSS reaches roughly 2x the
+  # heap because of Flink's off-heap usage, see
+  # https://github.com/google/fhir-data-pipes/issues/777. Keeping heap <= 50%
+  # of the limit leaves room for that off-heap memory. Deployments that want a
+  # fixed heap can set JAVA_OPTS (e.g. "-Xms6g -Xmx6g") explicitly.
+  # Note this is related to the memory config in flink-conf.yaml too.
+  JAVA_OPTS="-XX:MaxRAMPercentage=50.0"
 fi
 
-# The -Xmx value is to make sure there is a minimum amount of memory; it can be
-# increased if more memory is available and is desired to be used by pipelines.
-# Note this is related to the memory config in flink-conf.yaml too.
 java $JAVA_OPTS -jar /app/controller-bundled.jar
