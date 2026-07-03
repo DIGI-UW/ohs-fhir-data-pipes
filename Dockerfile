@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Copyright 2022 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +42,13 @@ ARG SKIP_TESTS=false
 
 # Updating license will fail in e2e and there is no point doing it here anyways.
 # Note this build can be faster by excluding some uber-jars we don't copy.
-RUN mvn --no-transfer-progress --batch-mode clean package -DskipTests=${SKIP_TESTS} -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
+#
+# The cache mount persists ~/.m2/repository across builds (BuildKit-only; CI already uses
+# docker/build-push-action which enables BuildKit by default). Without it, every build re-downloads
+# the entire dependency tree from scratch because the base maven image starts with an empty
+# repository and nothing in this Dockerfile was caching it before.
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn --no-transfer-progress --batch-mode clean package -DskipTests=${SKIP_TESTS} -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
 
 FROM eclipse-temurin:17-jdk-focal as main
 
