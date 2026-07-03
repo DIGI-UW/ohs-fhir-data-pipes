@@ -199,6 +199,31 @@ fhirdata:
   # https://github.com/FHIR/sql-on-fhir/blob/master/sql-on-fhir.md#recursive-structures
   recursiveDepth: 1
 
+  # How pipeline runs are executed; one of IN_PROCESS or SUBPROCESS (default
+  # IN_PROCESS). With IN_PROCESS, Beam/Flink runs inside the controller's JVM:
+  # simplest setup, but a run's memory (including Flink's substantial off-heap
+  # usage) is shared with the web app, so a large run can OOM-kill the whole
+  # controller. With SUBPROCESS, each pipeline stage runs in a short-lived child
+  # JVM launched from the same jar: the child's heap, off-heap memory and temp
+  # files are fully released when the stage finishes, and an OOM-killed run is
+  # reported as a failed run while the web app stays up. SUBPROCESS is
+  # recommended for containerized/production deployments.
+  # Note: FlinkConfiguration's memory validation runs in the controller JVM but
+  # sizes the pipeline workload; with SUBPROCESS both JVMs see the same container
+  # limit and default to 50% of it, so the validation remains a reasonable
+  # approximation of the worker.
+  #pipelineExecutionMode: "SUBPROCESS"
+
+  # JVM options for the SUBPROCESS worker JVM, whitespace-separated (flags with
+  # embedded spaces are not supported). Default: -XX:MaxRAMPercentage=50.0
+  #workerJavaOptions: "-XX:MaxRAMPercentage=50.0"
+
+  # The jar to launch the SUBPROCESS worker from. Leave unset to auto-detect the
+  # controller's own jar (works when the controller is started with `java -jar`,
+  # as in the Docker image); set explicitly when running the controller from an
+  # IDE or an exploded classpath.
+  #workerJarPath: ""
+
 # Enable spring boot actuator end points, use "*" to expose all endpoints, or a comma-separated
 # list to expose selected ones
 management:

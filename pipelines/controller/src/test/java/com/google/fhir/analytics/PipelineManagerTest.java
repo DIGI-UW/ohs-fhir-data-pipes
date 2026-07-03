@@ -17,10 +17,12 @@ package com.google.fhir.analytics;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Files;
@@ -115,6 +117,26 @@ public class PipelineManagerTest {
     // getNextIncrementalTime should return null
     LocalDateTime next = pipelineManager.getNextIncrementalTime();
     assertThat(next, is(nullValue()));
+  }
+
+  @Test
+  public void testExecutorSelectionByMode() {
+    DataProperties dp = mock(DataProperties.class);
+    PipelineManager manager = new PipelineManager(dp, dwhFilesManager, mock(MeterRegistry.class));
+
+    when(dp.getPipelineExecutionMode()).thenReturn(PipelineExecutionMode.SUBPROCESS);
+    assertThat(manager.createExecutor(), instanceOf(SubprocessPipelineExecutor.class));
+
+    when(dp.getPipelineExecutionMode()).thenReturn(PipelineExecutionMode.IN_PROCESS);
+    assertThat(manager.createExecutor(), instanceOf(InProcessPipelineExecutor.class));
+  }
+
+  @Test
+  public void testShutdownIsNoOpWhenNothingRunning() {
+    // No pipeline started -> @PreDestroy shutdown() must not throw.
+    PipelineManager manager =
+        new PipelineManager(mock(DataProperties.class), dwhFilesManager, mock(MeterRegistry.class));
+    manager.shutdown();
   }
 
   @Test

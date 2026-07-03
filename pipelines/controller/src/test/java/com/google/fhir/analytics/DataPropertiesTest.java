@@ -75,6 +75,30 @@ public class DataPropertiesTest {
     Assertions.assertEquals("Admin", pipelineConfig.getFhirEtlOptions().getFhirServerUserName());
   }
 
+  @Test
+  void pipelineExecutionMode_defaultsToInProcess() {
+    // application-test.properties does not set it, so validateProperties() must default it.
+    Assertions.assertEquals(
+        PipelineExecutionMode.IN_PROCESS, dataProperties.getPipelineExecutionMode());
+  }
+
+  @Test
+  void workerJavaOptions_hasContainerAwareDefault() {
+    Assertions.assertEquals("-XX:MaxRAMPercentage=50.0", dataProperties.getWorkerJavaOptions());
+  }
+
+  @Test
+  void getConfigParams_exposesExecutionModeSettings() {
+    boolean hasMode =
+        dataProperties.getConfigParams().stream()
+            .anyMatch(c -> "fhirdata.pipelineExecutionMode".equals(c.getName()));
+    boolean hasWorkerOpts =
+        dataProperties.getConfigParams().stream()
+            .anyMatch(c -> "fhirdata.workerJavaOptions".equals(c.getName()));
+    Assertions.assertTrue(hasMode);
+    Assertions.assertTrue(hasWorkerOpts);
+  }
+
   @AfterAll
   public static void tearDown() throws IOException {
     mockFhirServer.shutdown();

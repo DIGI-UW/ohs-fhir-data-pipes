@@ -50,6 +50,11 @@ fhirdata:
   #sinkUserName: "hapi"
   #sinkPassword: "hapi123"
   recursiveDepth: 1
+  # Run each pipeline stage in a short-lived child JVM so a run's memory pressure
+  # (or an OOM-kill) cannot take down the controller web app; the child's heap,
+  # Flink off-heap memory and temp files are released when it exits. See
+  # pipelines/controller/config/application.yaml for the full documentation.
+  pipelineExecutionMode: "SUBPROCESS"
 
 # Enable spring boot actuator end points, use "*" to expose all endpoints, or a comma-separated
 # list to expose selected ones
