@@ -80,32 +80,27 @@ public final class WorkerProtocol {
     // Beam PipelineOptions serialized as a JSON tree (FhirEtlOptions for ETL, ParquetMergerOptions
     // for MERGE). Deserialized with MAPPER.treeToValue(options, PipelineOptions.class).
     @Nullable public JsonNode options;
-    public int progressIntervalSeconds = 5;
 
     public Task() {}
 
-    public Task(TaskType taskType, JsonNode options, int progressIntervalSeconds) {
+    public Task(TaskType taskType, JsonNode options) {
       this.taskType = taskType;
       this.options = options;
-      this.progressIntervalSeconds = progressIntervalSeconds;
     }
   }
 
-  /** {@code progress.json}: mirrors {@code CumulativeMetrics} plus a freshness stamp. */
+  /** {@code progress.json}: mirrors {@code CumulativeMetrics}. */
   public static final class Progress {
     public long totalResources;
     public long fetchedResources;
     public long mappedResources;
-    public long epochMillis;
 
     public Progress() {}
 
-    public Progress(
-        long totalResources, long fetchedResources, long mappedResources, long epochMillis) {
+    public Progress(long totalResources, long fetchedResources, long mappedResources) {
       this.totalResources = totalResources;
       this.fetchedResources = fetchedResources;
       this.mappedResources = mappedResources;
-      this.epochMillis = epochMillis;
     }
   }
 

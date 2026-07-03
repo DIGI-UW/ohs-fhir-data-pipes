@@ -32,7 +32,6 @@ import org.apache.beam.runners.flink.FlinkRunner;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -128,24 +127,15 @@ public class DataProperties {
 
   private boolean generateParquetFiles;
 
-  @Nullable private PipelineExecutionMode pipelineExecutionMode;
+  // Spring overwrites these initializers only when the property is explicitly configured.
+  private PipelineExecutionMode pipelineExecutionMode = PipelineExecutionMode.IN_PROCESS;
 
-  @Nullable private String workerJavaOptions;
+  private String workerJavaOptions = "-XX:MaxRAMPercentage=50.0";
 
-  @Nullable private String workerJarPath;
+  private String workerJarPath = "";
 
   @PostConstruct
   void validateProperties() {
-    // Normalize optional execution-mode settings so downstream code never sees null.
-    if (pipelineExecutionMode == null) {
-      pipelineExecutionMode = PipelineExecutionMode.IN_PROCESS;
-    }
-    if (workerJavaOptions == null) {
-      workerJavaOptions = "-XX:MaxRAMPercentage=50.0";
-    }
-    if (workerJarPath == null) {
-      workerJarPath = "";
-    }
     CronExpression.parse(incrementalSchedule);
     Preconditions.checkState(
         FhirFetchMode.FHIR_SEARCH.equals(fhirFetchMode)
@@ -300,14 +290,9 @@ public class DataProperties {
         new ConfigFields("fhirdata.recursiveDepth", String.valueOf(recursiveDepth), "", ""),
         new ConfigFields(
             "fhirdata.createParquetViews", String.valueOf(createParquetViews), "", ""),
-        new ConfigFields(
-            "fhirdata.pipelineExecutionMode",
-            pipelineExecutionMode != null ? pipelineExecutionMode.name() : "",
-            "",
-            ""),
-        new ConfigFields(
-            "fhirdata.workerJavaOptions", Strings.nullToEmpty(workerJavaOptions), "", ""),
-        new ConfigFields("fhirdata.workerJarPath", Strings.nullToEmpty(workerJarPath), "", ""));
+        new ConfigFields("fhirdata.pipelineExecutionMode", pipelineExecutionMode.name(), "", ""),
+        new ConfigFields("fhirdata.workerJavaOptions", workerJavaOptions, "", ""),
+        new ConfigFields("fhirdata.workerJarPath", workerJarPath, "", ""));
   }
 
   ConfigFields getConfigFields(FhirEtlOptions options, Method getMethod) {

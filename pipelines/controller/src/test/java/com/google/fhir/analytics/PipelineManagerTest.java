@@ -16,6 +16,7 @@
 package com.google.fhir.analytics;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.google.fhir.analytics.metrics.CumulativeMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,12 +49,40 @@ public class PipelineManagerTest {
 
   private final LocalDateTime lastRunEndTimestamp = LocalDateTime.of(2025, 12, 29, 10, 0);
 
+  private DataProperties dataProperties;
+
   @BeforeEach
   void setUp() {
-    DataProperties dataProperties = mock(DataProperties.class);
+    dataProperties = mock(DataProperties.class);
     MeterRegistry meterRegistry = mock(MeterRegistry.class);
     pipelineManager =
         Mockito.spy(new PipelineManager(dataProperties, dwhFilesManager, meterRegistry));
+  }
+
+  /**
+   * Prepares the spy manager so runBatchPipeline(false) can start a real PipelineThread whose
+   * stages run on the given executor: FULL-mode options rooted in {@code dwhRoot}, a bare
+   * FlinkConfiguration (null conf dir is skipped), and executor injection via createExecutor().
+   */
+  private void wireForFullRun(PipelineExecutor executor, Path dwhRoot) {
+    org.springframework.test.util.ReflectionTestUtils.setField(
+        pipelineManager, "flinkConfiguration", new FlinkConfiguration());
+    FhirEtlOptions options =
+        org.apache.beam.sdk.options.PipelineOptionsFactory.as(FhirEtlOptions.class);
+    options.setFhirFetchMode(FhirFetchMode.FHIR_SEARCH);
+    options.setFhirServerUrl("http://localhost:9091/fhir");
+    options.setFhirVersion(ca.uhn.fhir.context.FhirVersionEnum.R4);
+    options.setOutputParquetPath(dwhRoot.toString());
+    Mockito.when(dataProperties.createBatchOptions())
+        .thenReturn(PipelineConfig.builder().fhirEtlOptions(options).build());
+    Mockito.doReturn(executor).when(pipelineManager).createExecutor();
+  }
+
+  private void awaitPipelineEnd() throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 20000;
+    while (pipelineManager.isRunning() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(100);
+    }
   }
 
   @Test
@@ -117,6 +147,105 @@ public class PipelineManagerTest {
     // getNextIncrementalTime should return null
     LocalDateTime next = pipelineManager.getNextIncrementalTime();
     assertThat(next, is(nullValue()));
+  }
+
+  @Test
+  public void testPipelineThreadDelegatesEtlToExecutor(@TempDir Path dwhRoot) throws Exception {
+    // Guards the WIRING: if PipelineThread.run() stops delegating to the executor (e.g. a refactor
+    // calls FhirEtl directly again), this fails. Uses the no-work path so no bookkeeping runs.
+    PipelineExecutor executor = mock(PipelineExecutor.class);
+    Mockito.when(executor.runEtl(Mockito.any())).thenReturn(false);
+    wireForFullRun(executor, dwhRoot);
+
+    pipelineManager.runBatchPipeline(false);
+    awaitPipelineEnd();
+
+    Mockito.verify(executor, Mockito.timeout(10000)).runEtl(Mockito.any());
+  }
+
+  @Test
+  public void testPipelineThreadMapsExecutorFailureToFailedRun(@TempDir Path dwhRoot)
+      throws Exception {
+    // An executor failure (e.g. the worker JVM was OOM-killed) must flow through the existing
+    // error-capture path: error.log written into the run's DWH root and the run marked FAILURE.
+    PipelineExecutor executor = mock(PipelineExecutor.class);
+    Mockito.when(executor.runEtl(Mockito.any()))
+        .thenThrow(new RuntimeException("worker OOM-killed"));
+    wireForFullRun(executor, dwhRoot);
+    Mockito.doNothing().when(pipelineManager).setLastRunDetails(Mockito.any(), Mockito.any());
+
+    pipelineManager.runBatchPipeline(false);
+    awaitPipelineEnd();
+
+    Mockito.verify(pipelineManager, Mockito.timeout(10000))
+        .setLastRunDetails(Mockito.any(), Mockito.eq("FAILURE"));
+    assertThat(Files.exists(dwhRoot.resolve("error.log")), is(true));
+    assertThat(Files.readString(dwhRoot.resolve("error.log")), containsString("worker OOM-killed"));
+  }
+
+  @Test
+  public void testLiveProgressDelegatesToExecutorWhileRunning(@TempDir Path dwhRoot)
+      throws Exception {
+    // getCumulativeMetrics() must read progress from the run's executor while a FULL run is live.
+    PipelineExecutor executor = mock(PipelineExecutor.class);
+    java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+    CumulativeMetrics sentinel = new CumulativeMetrics(100, 50, 40);
+    Mockito.when(executor.getProgress()).thenReturn(sentinel);
+    Mockito.when(executor.runEtl(Mockito.any()))
+        .thenAnswer(
+            inv -> {
+              latch.await();
+              return false; // no-work: skips all post-run bookkeeping
+            });
+    wireForFullRun(executor, dwhRoot);
+
+    pipelineManager.runBatchPipeline(false);
+    try {
+      long deadline = System.currentTimeMillis() + 10000;
+      CumulativeMetrics seen = null;
+      while (seen == null && System.currentTimeMillis() < deadline) {
+        seen = pipelineManager.getCumulativeMetrics();
+        Thread.sleep(50);
+      }
+      assertThat(seen, is(sentinel));
+    } finally {
+      latch.countDown();
+      awaitPipelineEnd();
+    }
+  }
+
+  @Test
+  public void testDockerShippedConfigBindsAndSelectsSubprocessMode() throws Exception {
+    // The shipped docker config is the only thing that turns SUBPROCESS on in production; guard
+    // that the file exists, binds to DataProperties, and actually selects SUBPROCESS.
+    Path dir = Path.of("").toAbsolutePath();
+    Path yaml = null;
+    while (dir != null) {
+      Path candidate = dir.resolve("docker/config/application.yaml");
+      if (Files.exists(candidate)) {
+        yaml = candidate;
+        break;
+      }
+      dir = dir.getParent();
+    }
+    assertThat("docker/config/application.yaml not found above " + Path.of("").toAbsolutePath(),
+        yaml, is(org.hamcrest.Matchers.notNullValue()));
+
+    java.util.List<org.springframework.core.env.PropertySource<?>> sources =
+        new org.springframework.boot.env.YamlPropertySourceLoader()
+            .load("docker-config", new org.springframework.core.io.FileSystemResource(yaml.toFile()));
+    org.springframework.core.env.MutablePropertySources mps =
+        new org.springframework.core.env.MutablePropertySources();
+    sources.forEach(mps::addLast);
+    DataProperties bound =
+        new org.springframework.boot.context.properties.bind.Binder(
+                org.springframework.boot.context.properties.source.ConfigurationPropertySources
+                    .from(mps))
+            .bind(
+                "fhirdata",
+                org.springframework.boot.context.properties.bind.Bindable.of(DataProperties.class))
+            .get();
+    assertThat(bound.getPipelineExecutionMode(), is(PipelineExecutionMode.SUBPROCESS));
   }
 
   @Test

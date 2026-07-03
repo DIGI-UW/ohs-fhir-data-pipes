@@ -39,17 +39,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Entry point for a single pipeline run executed in its own JVM. The pipeline-controller spawns one
- * of these per run when {@code pipelineExecutionMode=SUBPROCESS}; when the run finishes the JVM
- * exits, which releases the heap, Flink off-heap memory and any temp files the run allocated. This
- * is what keeps a run's memory pressure (and an OOM-kill) from taking down the controller's web
- * app, and what makes the disk-fill / off-heap-creep pathologies self-cleaning.
- *
- * <p>It intentionally reuses the exact same build/run code as the in-process path ({@link FhirEtl},
- * {@link ParquetMerger}, {@link EtlUtils}) — the only difference is where the JVM boundary sits. The
- * standalone {@link FhirEtl#main} / {@link ParquetMerger#main} entry points are untouched; this
- * worker exists because it additionally speaks the {@link WorkerProtocol} (JSON options in, progress
- * and result files out).
+ * Entry point for a single pipeline run executed in its own JVM, speaking the {@link
+ * WorkerProtocol} (JSON options in; progress and result files out) while reusing the exact same
+ * build/run code as the in-process path ({@link FhirEtl}, {@link ParquetMerger}, {@link EtlUtils}).
+ * See {@code PipelineExecutionMode} for why runs are isolated in a child process.
  */
 public final class PipelineWorker {
 
@@ -90,9 +83,11 @@ public final class PipelineWorker {
 
       switch (taskType) {
         case ETL:
-          return runEtl(task, resultFile, progressFile);
+          runEtl(task, resultFile, progressFile);
+          return 0;
         case MERGE:
-          return runMerge(task, resultFile);
+          runMerge(task, resultFile);
+          return 0;
         default:
           throw new IllegalArgumentException("Unknown taskType: " + task.taskType);
       }
@@ -104,7 +99,7 @@ public final class PipelineWorker {
     }
   }
 
-  private static int runEtl(WorkerProtocol.Task task, Path resultFile, Path progressFile)
+  private static void runEtl(WorkerProtocol.Task task, Path resultFile, Path progressFile)
       throws Exception {
     FhirEtlOptions options =
         WorkerProtocol.MAPPER.treeToValue(task.options, PipelineOptions.class).as(FhirEtlOptions.class);
@@ -126,10 +121,10 @@ public final class PipelineWorker {
       logger.info("No resources found to be fetched; nothing to do.");
       WorkerProtocol.writeResult(
           resultFile, new WorkerProtocol.Result(WorkerProtocol.ResultStatus.NO_WORK, null, null));
-      return 0;
+      return;
     }
 
-    ProgressReporter reporter = new ProgressReporter(progressFile, task.progressIntervalSeconds);
+    ProgressReporter reporter = new ProgressReporter(progressFile);
     reporter.start();
     List<PipelineResult> results;
     try {
@@ -141,10 +136,9 @@ public final class PipelineWorker {
         resultFile,
         new WorkerProtocol.Result(
             WorkerProtocol.ResultStatus.SUCCESS, null, collectCounters(results)));
-    return 0;
   }
 
-  private static int runMerge(WorkerProtocol.Task task, Path resultFile) throws Exception {
+  private static void runMerge(WorkerProtocol.Task task, Path resultFile) throws Exception {
     ParquetMergerOptions options =
         WorkerProtocol.MAPPER
             .treeToValue(task.options, PipelineOptions.class)
@@ -165,7 +159,6 @@ public final class PipelineWorker {
         resultFile,
         new WorkerProtocol.Result(
             WorkerProtocol.ResultStatus.SUCCESS, null, collectCounters(results)));
-    return 0;
   }
 
   /** Aggregates final Beam counters across pipelines, keyed exactly as the controller's gauges. */
@@ -200,14 +193,14 @@ public final class PipelineWorker {
    * swallowed. Runs as a daemon thread.
    */
   private static final class ProgressReporter {
+    private static final long INTERVAL_MILLIS = 5000L;
+
     private final Path progressFile;
-    private final long intervalMillis;
     private volatile boolean running = true;
     @Nullable private Thread thread;
 
-    ProgressReporter(Path progressFile, int intervalSeconds) {
+    ProgressReporter(Path progressFile) {
       this.progressFile = progressFile;
-      this.intervalMillis = Math.max(1, intervalSeconds) * 1000L;
     }
 
     void start() {
@@ -217,7 +210,7 @@ public final class PipelineWorker {
                 while (running) {
                   writeOnce();
                   try {
-                    Thread.sleep(intervalMillis);
+                    Thread.sleep(INTERVAL_MILLIS);
                   } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
@@ -250,10 +243,7 @@ public final class PipelineWorker {
         WorkerProtocol.writeProgress(
             progressFile,
             new WorkerProtocol.Progress(
-                cm.getTotalResources(),
-                cm.getFetchedResources(),
-                cm.getMappedResources(),
-                System.currentTimeMillis()));
+                cm.getTotalResources(), cm.getFetchedResources(), cm.getMappedResources()));
       } catch (Throwable t) {
         logger.debug("Could not write progress file (non-fatal)", t);
       }

@@ -57,6 +57,28 @@ public final class WorkerTestStub {
                 WorkerProtocol.ResultStatus.ERROR, "java.lang.RuntimeException: boom", null));
         System.exit(1);
         break;
+      case "SUCCESS_THEN_DIE":
+        // Wrote a valid SUCCESS result, then died during teardown (e.g. OOM-killed after the
+        // work finished). The executor must treat a dirty exit as failure, result or not.
+        WorkerProtocol.writeResult(
+            resultFile,
+            new WorkerProtocol.Result(
+                WorkerProtocol.ResultStatus.SUCCESS,
+                null,
+                Map.of("PipelineMetrics_numFetchedResources_Patient", 5L)));
+        System.exit(3);
+        break;
+      case "EXIT_ZERO_NO_RESULT":
+        // A clean exit that violated the protocol (no result file) must never read as success.
+        System.out.println("worker finished without writing a result");
+        System.exit(0);
+        break;
+      case "WRITE_PROGRESS_THEN_SLEEP":
+        WorkerProtocol.writeProgress(
+            workDir.resolve(WorkerProtocol.PROGRESS_FILE), new WorkerProtocol.Progress(10, 4, 2));
+        Thread.sleep(60_000);
+        System.exit(0);
+        break;
       case "CRASH_NO_RESULT":
         // Simulate an OOM-kill: emit output and die without writing a result file.
         System.out.println("worker line 1");

@@ -29,11 +29,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import ca.uhn.fhir.context.FhirVersionEnum;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.junit.jupiter.api.Test;
@@ -63,11 +65,14 @@ public class SubprocessPipelineExecutorTest {
     return dp;
   }
 
+  private final AtomicReference<Path> lastWorkDir = new AtomicReference<>();
+
   /** Runs {@link WorkerTestStub} on the current test classpath with the given behavior. */
   private SubprocessPipelineExecutor stubExecutor(PipelineManager manager, String behavior) {
     return new SubprocessPipelineExecutor(manager, mock(DataProperties.class)) {
       @Override
       List<String> buildCommand(Path taskFile) {
+        lastWorkDir.set(taskFile.getParent());
         return List.of(
             Paths.get(System.getProperty("java.home"), "bin", "java").toString(),
             "-cp",
@@ -75,6 +80,22 @@ public class SubprocessPipelineExecutorTest {
             WorkerTestStub.class.getName(),
             taskFile.toString(),
             behavior);
+      }
+    };
+  }
+
+  /** Runs the real {@link PipelineWorker} main on the test classpath (no PropertiesLauncher). */
+  private SubprocessPipelineExecutor realWorkerExecutor(PipelineManager manager) {
+    return new SubprocessPipelineExecutor(manager, mock(DataProperties.class)) {
+      @Override
+      List<String> buildCommand(Path taskFile) {
+        lastWorkDir.set(taskFile.getParent());
+        return List.of(
+            Paths.get(System.getProperty("java.home"), "bin", "java").toString(),
+            "-cp",
+            System.getProperty("java.class.path"),
+            PipelineWorker.class.getName(),
+            taskFile.toString());
       }
     };
   }
@@ -97,6 +118,26 @@ public class SubprocessPipelineExecutorTest {
     // -cp must immediately precede the jar.
     int cpIndex = command.indexOf("-cp");
     assertThat(command.get(cpIndex + 1), is("/app/controller-bundled.jar"));
+    // Launch-order invariants: JVM flags and -Dloader.main before the launcher class, the task
+    // file as the program argument after it. (The process-outcome tests override buildCommand,
+    // so these ordering assertions are the only guard against a reordering regression.)
+    int loaderMainIdx = command.indexOf("-Dloader.main=com.google.fhir.analytics.PipelineWorker");
+    int launcherIdx = command.indexOf("org.springframework.boot.loader.launch.PropertiesLauncher");
+    int taskIdx = command.indexOf("/work/task.json");
+    assertTrue(loaderMainIdx < launcherIdx && launcherIdx < taskIdx);
+  }
+
+  @Test
+  public void testResolveWorkerJarAutoDetectsSingleJarClasspath() {
+    String saved = System.getProperty("java.class.path");
+    try {
+      System.setProperty("java.class.path", "/app/controller-bundled.jar");
+      SubprocessPipelineExecutor executor =
+          new SubprocessPipelineExecutor(mock(PipelineManager.class), dataPropsWith("", ""));
+      assertThat(executor.resolveWorkerJar(), is("/app/controller-bundled.jar"));
+    } finally {
+      System.setProperty("java.class.path", saved);
+    }
   }
 
   @Test
@@ -131,6 +172,38 @@ public class SubprocessPipelineExecutorTest {
     verify(manager).publishPipelineMetrics(captor.capture());
     assertThat(
         captor.getValue().get("PipelineMetrics_numFetchedResources_Patient"), is(5L));
+    // The per-run work dir carries credentials in task.json; it must be gone after the run.
+    assertThat(Files.notExists(lastWorkDir.get()), is(true));
+  }
+
+  @Test
+  public void testRunEtlResultSuccessButNonZeroExitThrows() {
+    // A worker that wrote SUCCESS but exited dirty (killed during teardown) must be a failure,
+    // and its counters must NOT be published.
+    PipelineManager manager = mock(PipelineManager.class);
+    SubprocessPipelineExecutor executor = stubExecutor(manager, "SUCCESS_THEN_DIE");
+
+    SubprocessPipelineExecutor.PipelineWorkerException e =
+        assertThrows(
+            SubprocessPipelineExecutor.PipelineWorkerException.class,
+            () -> executor.runEtl(minimalEtlOptions()));
+    assertThat(e.getMessage(), containsString("exit code 3"));
+    assertThat(e.getMessage(), containsString("SUCCESS"));
+    verify(manager, never())
+        .publishPipelineMetrics(org.mockito.ArgumentMatchers.<java.util.Map<String, Long>>any());
+  }
+
+  @Test
+  public void testExitZeroWithoutResultFileThrows() {
+    // A clean exit that violated the protocol (no result.json) must never read as success.
+    PipelineManager manager = mock(PipelineManager.class);
+    SubprocessPipelineExecutor executor = stubExecutor(manager, "EXIT_ZERO_NO_RESULT");
+
+    SubprocessPipelineExecutor.PipelineWorkerException e =
+        assertThrows(
+            SubprocessPipelineExecutor.PipelineWorkerException.class,
+            () -> executor.runEtl(minimalEtlOptions()));
+    assertThat(e.getMessage(), containsString("No result file"));
   }
 
   @Test
@@ -178,9 +251,9 @@ public class SubprocessPipelineExecutorTest {
   }
 
   @Test
-  public void testStopTerminatesRunningWorker() throws Exception {
+  public void testStopTerminatesRunningWorkerAndProgressIsReadable() throws Exception {
     PipelineManager manager = mock(PipelineManager.class);
-    SubprocessPipelineExecutor executor = stubExecutor(manager, "SLEEP");
+    SubprocessPipelineExecutor executor = stubExecutor(manager, "WRITE_PROGRESS_THEN_SLEEP");
 
     // runEtl blocks in waitFor() while the stub sleeps 60s; stop() must cut it short.
     CompletableFuture<Void> run =
@@ -192,12 +265,43 @@ public class SubprocessPipelineExecutorTest {
                 // The killed child yields a non-zero exit -> PipelineWorkerException; that's fine.
               }
             });
-    // Give the child time to start, then stop it.
-    Thread.sleep(3000);
-    executor.stop();
+    // Wait until the child proves it is alive by publishing progress, then read it through the
+    // public API — this also pins the progress-file wiring end to end.
+    com.google.fhir.analytics.metrics.CumulativeMetrics progress = null;
+    long deadline = System.currentTimeMillis() + 15000;
+    while (progress == null && System.currentTimeMillis() < deadline) {
+      progress = executor.getProgress();
+      Thread.sleep(100);
+    }
+    com.google.fhir.analytics.metrics.CumulativeMetrics nonNull =
+        java.util.Objects.requireNonNull(progress, "worker never published progress");
+    assertThat(nonNull.getTotalResources(), is(10L));
+    assertThat(nonNull.getFetchedResources(), is(4L));
 
+    executor.stop();
     // Without stop() this would hang ~60s; assert it unblocks quickly.
     run.get(20, TimeUnit.SECONDS);
     assertTrue(run.isDone());
+  }
+
+  @Test
+  public void testRealWorkerEmptyParquetInputYieldsNoWork(@org.junit.jupiter.api.io.TempDir Path dwh)
+      throws Exception {
+    // A REAL PipelineWorker child JVM (not the stub) over an empty PARQUET input: the worker must
+    // deserialize options, find nothing to do, write NO_WORK, and the executor must return false.
+    PipelineManager manager = mock(PipelineManager.class);
+    SubprocessPipelineExecutor executor = realWorkerExecutor(manager);
+
+    PipelineOptionsFactory.register(FhirEtlOptions.class);
+    FhirEtlOptions options = PipelineOptionsFactory.as(FhirEtlOptions.class);
+    options.setFhirFetchMode(FhirFetchMode.PARQUET);
+    options.setFhirVersion(FhirVersionEnum.R4);
+    options.setParquetInputDwhRoot(dwh.toString());
+
+    boolean workDone = executor.runEtl(options);
+
+    assertFalse(workDone);
+    verify(manager, never())
+        .publishPipelineMetrics(org.mockito.ArgumentMatchers.<java.util.Map<String, Long>>any());
   }
 }

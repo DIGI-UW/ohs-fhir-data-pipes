@@ -16,6 +16,7 @@
 package com.google.fhir.analytics;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
@@ -54,7 +55,16 @@ public class PipelineWorkerTest {
     FhirEtlOptions original = PipelineOptionsFactory.as(FhirEtlOptions.class);
     original.setFhirFetchMode(FhirFetchMode.FHIR_SEARCH);
     original.setFhirServerUrl("http://example/fhir");
-    original.setFhirServerPassword("s3cr3t"); // must survive so the worker can authenticate
+    // Every credential/connection field the controller sets programmatically must survive the
+    // round-trip, or the worker cannot authenticate (mirrors DataProperties.createBatchOptions).
+    original.setFhirServerPassword("s3cr3t");
+    original.setFhirServerUserName("admin-user");
+    original.setFhirServerOAuthTokenEndpoint("http://auth/token");
+    original.setFhirServerOAuthClientId("client-id");
+    original.setFhirServerOAuthClientSecret("client-secret");
+    original.setSinkUserName("sink-user");
+    original.setSinkPassword("sink-pass");
+    original.setFhirDatabaseConfigPath("/config/hapi-postgres.json");
     original.setResourceList("Patient,Observation");
     original.setOutputParquetPath("/dwh/run_TIMESTAMP_X");
     original.setSince("2026-01-02T03:04:05Z");
@@ -72,6 +82,13 @@ public class PipelineWorkerTest {
     assertThat(restored.getFhirFetchMode(), is(FhirFetchMode.FHIR_SEARCH));
     assertThat(restored.getFhirServerUrl(), equalTo("http://example/fhir"));
     assertThat(restored.getFhirServerPassword(), equalTo("s3cr3t"));
+    assertThat(restored.getFhirServerUserName(), equalTo("admin-user"));
+    assertThat(restored.getFhirServerOAuthTokenEndpoint(), equalTo("http://auth/token"));
+    assertThat(restored.getFhirServerOAuthClientId(), equalTo("client-id"));
+    assertThat(restored.getFhirServerOAuthClientSecret(), equalTo("client-secret"));
+    assertThat(restored.getSinkUserName(), equalTo("sink-user"));
+    assertThat(restored.getSinkPassword(), equalTo("sink-pass"));
+    assertThat(restored.getFhirDatabaseConfigPath(), equalTo("/config/hapi-postgres.json"));
     assertThat(restored.getResourceList(), equalTo("Patient,Observation"));
     assertThat(restored.getOutputParquetPath(), equalTo("/dwh/run_TIMESTAMP_X"));
     assertThat(restored.getSince(), equalTo("2026-01-02T03:04:05Z"));
@@ -118,11 +135,9 @@ public class PipelineWorkerTest {
     Path taskFile = tempDir.resolve(WorkerProtocol.TASK_FILE);
     WorkerProtocol.writeTask(
         taskFile,
-        new WorkerProtocol.Task(
-            WorkerProtocol.TaskType.ETL, WorkerProtocol.MAPPER.valueToTree(options), 5));
+        new WorkerProtocol.Task(WorkerProtocol.TaskType.ETL, WorkerProtocol.MAPPER.valueToTree(options)));
     WorkerProtocol.Task readBack = WorkerProtocol.readTask(taskFile);
     assertThat(readBack.taskType, is(WorkerProtocol.TaskType.ETL));
-    assertThat(readBack.progressIntervalSeconds, is(5));
     assertThat(
         deserialize(readBack.options).as(FhirEtlOptions.class).getFhirFetchMode(),
         is(FhirFetchMode.PARQUET));
@@ -139,14 +154,24 @@ public class PipelineWorkerTest {
   }
 
   @Test
-  public void testProgressAtomicWriteAndRead() throws Exception {
+  public void testProgressOverwriteAndTmpCleanup() throws Exception {
     Path progressFile = tempDir.resolve(WorkerProtocol.PROGRESS_FILE);
-    WorkerProtocol.writeProgress(progressFile, new WorkerProtocol.Progress(100, 40, 30, 1_700_000L));
+    WorkerProtocol.writeProgress(progressFile, new WorkerProtocol.Progress(100, 40, 30));
     WorkerProtocol.Progress progress = WorkerProtocol.readProgressOrNull(progressFile);
     assertThat(progress, is(notNullValue()));
     assertThat(progress.totalResources, equalTo(100L));
     assertThat(progress.fetchedResources, equalTo(40L));
     assertThat(progress.mappedResources, equalTo(30L));
+
+    // Overwrite semantics: a second snapshot fully replaces the first, and the temp file used for
+    // the write is moved away, not left behind.
+    WorkerProtocol.writeProgress(progressFile, new WorkerProtocol.Progress(200, 90, 80));
+    WorkerProtocol.Progress second = WorkerProtocol.readProgressOrNull(progressFile);
+    assertThat(second.totalResources, equalTo(200L));
+    assertThat(second.fetchedResources, equalTo(90L));
+    assertThat(second.mappedResources, equalTo(80L));
+    assertThat(
+        Files.notExists(tempDir.resolve(WorkerProtocol.PROGRESS_FILE + ".tmp")), is(true));
   }
 
   @Test
@@ -171,8 +196,7 @@ public class PipelineWorkerTest {
     Path taskFile = tempDir.resolve(WorkerProtocol.TASK_FILE);
     WorkerProtocol.writeTask(
         taskFile,
-        new WorkerProtocol.Task(
-            WorkerProtocol.TaskType.ETL, WorkerProtocol.MAPPER.valueToTree(options), 5));
+        new WorkerProtocol.Task(WorkerProtocol.TaskType.ETL, WorkerProtocol.MAPPER.valueToTree(options)));
 
     int exit = PipelineWorker.run(taskFile);
 
@@ -180,7 +204,11 @@ public class PipelineWorkerTest {
     WorkerProtocol.Result result =
         WorkerProtocol.readResult(tempDir.resolve(WorkerProtocol.RESULT_FILE));
     assertThat(result.status, is(WorkerProtocol.ResultStatus.ERROR));
-    assertThat(result.errorStackTrace, is(notNullValue()));
+    // Prove the worker deserialized the options and failed at the INTENDED validation step,
+    // not on some earlier setup accident.
+    assertThat(
+        result.errorStackTrace,
+        containsString("--fhirServerUrl cannot be empty for FHIR_SEARCH"));
   }
 
   @Test

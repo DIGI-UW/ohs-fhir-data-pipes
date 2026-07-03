@@ -467,11 +467,7 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
     currentPipeline =
         new PipelineThread(
-            options,
-            this,
-            pipelineConfig,
-            isRecreateViews ? RunMode.VIEWS : RunMode.FULL,
-            avroConversionUtil);
+            options, this, pipelineConfig, isRecreateViews ? RunMode.VIEWS : RunMode.FULL);
     if (isRecreateViews) {
       logger.info(
           "Running pipeline for recreating views from DWH {}", options.getParquetInputDwhRoot());
@@ -538,8 +534,7 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
       flinkOptionsForMerge.setParallelism(dataProperties.getNumThreads());
     }
     // Creating a thread for running both pipelines, one after the other.
-    currentPipeline =
-        new PipelineThread(options, mergerOptions, this, pipelineConfig, avroConversionUtil);
+    currentPipeline = new PipelineThread(options, mergerOptions, this, pipelineConfig);
     logger.info("Running incremental pipeline for DWH {} since {}", currentDwh.getRoot(), since);
     currentPipeline.start();
   }
@@ -750,8 +745,6 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
     @Nullable private final RunMode runMode;
 
-    private AvroConversionUtil avroConversionUtil;
-
     // Runs the actual Beam stages, either in this JVM or in a child process depending on the
     // configured execution mode. All other bookkeeping in run() is mode-independent.
     private final PipelineExecutor executor;
@@ -760,15 +753,13 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
         FhirEtlOptions options,
         PipelineManager manager,
         PipelineConfig pipelineConfig,
-        @Nullable RunMode runMode,
-        AvroConversionUtil avroConversionUtil) {
+        @Nullable RunMode runMode) {
       Preconditions.checkArgument(options != null);
       this.options = options;
       this.manager = manager;
       this.pipelineConfig = pipelineConfig;
       this.runMode = runMode;
       this.mergerOptions = null;
-      this.avroConversionUtil = avroConversionUtil;
       this.executor = manager.createExecutor();
     }
 
@@ -777,14 +768,12 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
         FhirEtlOptions options,
         ParquetMergerOptions mergerOptions,
         PipelineManager manager,
-        PipelineConfig pipelineConfig,
-        AvroConversionUtil avroConversionUtil) {
+        PipelineConfig pipelineConfig) {
       Preconditions.checkArgument(options != null);
       this.options = options;
       this.manager = manager;
       this.mergerOptions = mergerOptions;
       this.pipelineConfig = pipelineConfig;
-      this.avroConversionUtil = avroConversionUtil;
       this.executor = manager.createExecutor();
       this.runMode = RunMode.INCREMENTAL;
     }

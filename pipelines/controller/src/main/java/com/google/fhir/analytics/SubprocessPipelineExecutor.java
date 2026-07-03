@@ -38,11 +38,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Runs each pipeline stage in a short-lived child JVM ({@link PipelineWorker}) launched from the
- * controller's own Spring Boot fat jar via {@code PropertiesLauncher}. Options are handed over as a
- * JSON task file (see {@link WorkerProtocol}); the child's stdout/stderr are streamed to the
- * controller log and its terminal outcome is read back from {@code result.json}. When the child
- * exits, its heap, Flink off-heap memory and temp files go with it, which is the whole point: a
- * run's memory pressure can no longer take down the control plane.
+ * controller's own Spring Boot fat jar via {@code PropertiesLauncher}, exchanging {@link
+ * WorkerProtocol} files and streaming the child's output into the controller log. See {@link
+ * PipelineExecutionMode} for the isolation rationale.
  */
 class SubprocessPipelineExecutor implements PipelineExecutor {
 
@@ -52,7 +50,6 @@ class SubprocessPipelineExecutor implements PipelineExecutor {
   private static final String PROPERTIES_LAUNCHER =
       "org.springframework.boot.loader.launch.PropertiesLauncher";
   private static final int LOG_TAIL_LINES = 200;
-  private static final int PROGRESS_INTERVAL_SECONDS = 5;
 
   private final PipelineManager manager;
   private final DataProperties dataProperties;
@@ -127,9 +124,7 @@ class SubprocessPipelineExecutor implements PipelineExecutor {
     Path progressFile = workDir.resolve(WorkerProtocol.PROGRESS_FILE);
     try {
       WorkerProtocol.writeTask(
-          taskFile,
-          new WorkerProtocol.Task(
-              taskType, WorkerProtocol.MAPPER.valueToTree(options), PROGRESS_INTERVAL_SECONDS));
+          taskFile, new WorkerProtocol.Task(taskType, WorkerProtocol.MAPPER.valueToTree(options)));
       currentProgressFile = progressFile;
 
       List<String> command = buildCommand(taskFile);
@@ -246,6 +241,12 @@ class SubprocessPipelineExecutor implements PipelineExecutor {
     sb.append(").");
     if (result != null && !Strings.isNullOrEmpty(result.errorStackTrace)) {
       sb.append("\nWorker error:\n").append(result.errorStackTrace);
+    } else if (result != null) {
+      // The worker wrote a result (status SUCCESS/NO_WORK) but then exited non-zero, e.g. it was
+      // killed during teardown after finishing its work. Do not claim the result file is missing.
+      sb.append("\nWorker wrote result status ").append(result.status);
+      sb.append(" but exited abnormally. Last worker output:\n");
+      sb.append(String.join("\n", logTail));
     } else {
       sb.append("\nNo result file was written. Last worker output:\n");
       sb.append(String.join("\n", logTail));
