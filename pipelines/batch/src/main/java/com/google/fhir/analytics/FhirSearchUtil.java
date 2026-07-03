@@ -46,6 +46,10 @@ import org.slf4j.LoggerFactory;
 
 public class FhirSearchUtil {
 
+  // Sum of server-reported result totals across resource types, captured by the last
+  // createSegments call; used to seed the progress denominator of the run.
+  private long totalNumberOfResources = 0;
+
   private static final Logger log = LoggerFactory.getLogger(FhirSearchUtil.class);
 
   private final FetchUtil fetchUtil;
@@ -179,6 +183,7 @@ public class FhirSearchUtil {
   }
 
   Map<String, List<SearchSegmentDescriptor>> createSegments(FhirEtlOptions options) {
+    totalNumberOfResources = 0;
     if (options.getBatchSize() > 100) {
       // TODO: Probe this value from the server and set the maximum automatically.
       log.warn(
@@ -213,6 +218,7 @@ public class FhirSearchUtil {
       if (total == 0) {
         continue; // Nothing to be done for this resource type.
       }
+      totalNumberOfResources += total;
       if (searchBundle.getEntry().size() >= total) {
         // No parallelism is needed in this case; we get all resources in one bundle.
         segments.add(
@@ -290,5 +296,10 @@ public class FhirSearchUtil {
             .where(new ReferenceClientParam("patient").hasId(patientId))
             .where(new DateClientParam("date").beforeOrEquals().second(lastDate));
     return query.execute();
+  }
+
+  /** Total resources matched by the last {@link #createSegments} call across resource types. */
+  long getTotalNumberOfResources() {
+    return totalNumberOfResources;
   }
 }

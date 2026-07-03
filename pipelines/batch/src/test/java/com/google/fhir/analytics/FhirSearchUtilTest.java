@@ -148,6 +148,9 @@ public class FhirSearchUtilTest {
     Map<String, List<SearchSegmentDescriptor>> segmentMap = fhirSearchUtil.createSegments(options);
     assertThat(segmentMap.size(), equalTo(1));
     assertThat(segmentMap.get("Patient").size(), equalTo(4));
+    // The server-reported total (50 in the fixture bundle) must be captured so the pipeline can
+    // seed the progress denominator; without it the control panel percentage is stuck at 0.
+    assertThat(fhirSearchUtil.getTotalNumberOfResources(), equalTo(50L));
   }
 
   @SuppressWarnings("NullAway")
