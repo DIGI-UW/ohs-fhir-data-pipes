@@ -83,6 +83,11 @@ public class PipelineManagerTest {
     while (pipelineManager.isRunning() && System.currentTimeMillis() < deadline) {
       Thread.sleep(100);
     }
+    // A silent timeout here would let the test continue against a pipeline that is still running,
+    // which could produce a false pass (or leak the background thread into a later test) instead
+    // of an attributable failure at the point where the wait actually failed.
+    assertThat("pipeline thread did not finish within the wait deadline",
+        pipelineManager.isRunning(), is(false));
   }
 
   @Test
