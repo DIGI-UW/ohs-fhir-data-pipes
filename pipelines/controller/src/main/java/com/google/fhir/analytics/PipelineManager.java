@@ -198,9 +198,10 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
     // Spring runs @PostConstruct before any @Scheduled or API-triggered pipeline can start, so
     // every matching jar in the temp dir is stale at this point; this bounds disk usage even in a
-    // crash loop where no run ever completes.
-    cleanStaleFlinkRpcJars(
-        Paths.get(System.getProperty("java.io.tmpdir")), System.currentTimeMillis());
+    // crash loop where no run ever completes. Must never throw: this runs during bean
+    // initialization, so an uncaught exception here would fail the whole application context and
+    // prevent the controller from starting at all.
+    sweepStaleFlinkRpcJarsQuietly(System.currentTimeMillis());
 
     // Initialise the Flink configurations for all the pipelines
     initialiseFlinkConfiguration();
@@ -689,6 +690,24 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
   }
 
   /**
+   * Resolves {@code java.io.tmpdir} and runs {@link #cleanStaleFlinkRpcJars}, swallowing any
+   * failure. Called from both a {@code @PostConstruct} method and a {@code finally} block, neither
+   * of which may propagate an exception: {@code java.io.tmpdir} is guaranteed to be set by the JVM,
+   * but resolving it into a {@link Path} can still throw (e.g. {@link
+   * java.nio.file.InvalidPathException} for a malformed value, or a {@link SecurityException}
+   * under a security manager), and this sweep is a best-effort cleanup, not a correctness
+   * requirement.
+   */
+  @VisibleForTesting
+  static void sweepStaleFlinkRpcJarsQuietly(long cutoffMillis) {
+    try {
+      cleanStaleFlinkRpcJars(Paths.get(System.getProperty("java.io.tmpdir")), cutoffMillis);
+    } catch (Exception e) {
+      logger.warn("Could not sweep stale Flink tmp jars", e);
+    }
+  }
+
+  /**
    * Deletes {@code flink-rpc-akka_*.jar} files in {@code tmpDir} whose last-modified time is
    * strictly before {@code cutoffMillis}. Flink's MiniCluster extracts a fresh ~35 MiB copy of
    * this plugin jar to the system temp directory on every pipeline run. Flink deletes it again on
@@ -830,8 +849,10 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
         System.gc();
         // Defense-in-depth: Flink already deletes its jar on graceful shutdown and the startup
         // sweep alone bounds disk usage (MG-89); this only guards a future Flink cleanup
-        // regression. Cutoff = run start time preserves the current run's jar.
-        cleanStaleFlinkRpcJars(Paths.get(System.getProperty("java.io.tmpdir")), start);
+        // regression. Cutoff = run start time preserves the current run's jar. Must never throw:
+        // a finally block that throws would mask this run's already-recorded outcome and skip the
+        // timing log below.
+        sweepStaleFlinkRpcJarsQuietly(start);
         logger.info(
             "Total time taken for the pipelines = {} secs",
             (System.currentTimeMillis() - start) / 1000);

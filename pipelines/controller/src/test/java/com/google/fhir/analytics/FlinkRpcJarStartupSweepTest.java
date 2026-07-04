@@ -104,10 +104,15 @@ class FlinkRpcJarStartupSweepTest {
         plantedStaleJar.toFile().setLastModified(tenMinutesAgo),
         is(true));
 
-    // Control file: equally old, but name does not match the sweep pattern; must survive.
+    // Control file: equally old, but name does not match the sweep pattern; must survive. The
+    // sweep filter excludes it by name alone, so its mtime is not load-bearing for this test, but
+    // we still check the return value for consistency with the planted jar above.
     plantedControlFile = tmpDir.resolve("unrelated-" + unique + ".jar");
     Files.createFile(plantedControlFile);
-    plantedControlFile.toFile().setLastModified(tenMinutesAgo);
+    assertThat(
+        "test setup: could not backdate the control file",
+        plantedControlFile.toFile().setLastModified(tenMinutesAgo),
+        is(true));
   }
 
   @Test

@@ -169,4 +169,21 @@ public class PipelineManagerTest {
     PipelineManager.cleanStaleFlinkRpcJars(
         tmpDir.resolve("does-not-exist"), System.currentTimeMillis());
   }
+
+  @Test
+  public void testSweepStaleFlinkRpcJarsQuietlySwallowsBadTmpdir() {
+    // java.io.tmpdir is guaranteed non-null by the JVM, but Paths.get() can still throw for a
+    // malformed value (e.g. an embedded NUL character triggers InvalidPathException on every
+    // platform). Both call sites of this method (a @PostConstruct and a finally block) must never
+    // propagate an exception: one would abort Spring startup entirely, the other would mask an
+    // already-recorded run outcome. Reverting this method to call cleanStaleFlinkRpcJars directly
+    // (no try/catch) makes this test fail with an uncaught InvalidPathException.
+    String original = System.getProperty("java.io.tmpdir");
+    System.setProperty("java.io.tmpdir", "bad path");
+    try {
+      PipelineManager.sweepStaleFlinkRpcJarsQuietly(System.currentTimeMillis());
+    } finally {
+      System.setProperty("java.io.tmpdir", original);
+    }
+  }
 }
