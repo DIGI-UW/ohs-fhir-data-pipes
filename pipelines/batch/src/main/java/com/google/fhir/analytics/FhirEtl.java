@@ -163,8 +163,14 @@ public class FhirEtl {
 
     // Seed the progress denominator with the server-reported totals gathered while creating the
     // search segments; this mirrors the JDBC path and makes the control panel's percentage
-    // meaningful for FHIR_SEARCH runs. Note in the activePeriod case, patient-associated history
-    // fetches are not included in this count.
+    // meaningful for FHIR_SEARCH runs.
+    // Known gap in activePeriod mode: fetchPatientHistory's FetchSearchPageFn instances increment
+    // the same numFetchedResources_/numMappedResources_ counters as the main segments above, but
+    // their resource counts are not included in this denominator (the total below only reflects
+    // createSegments' main-segment totals). The percentage can therefore approach 100% before the
+    // patient-history fetches finish. Not fixed here because activePeriod is an existing
+    // half-implemented feature (see the TODO on FhirEtlOptions#getActivePeriod) and isn't used by
+    // any current deployment; revisit if/when that feature gets a real implementation.
     PipelineMetrics pipelineMetrics =
         PipelineMetricsProvider.getPipelineMetrics(options.getRunner());
     if (pipelineMetrics != null) {

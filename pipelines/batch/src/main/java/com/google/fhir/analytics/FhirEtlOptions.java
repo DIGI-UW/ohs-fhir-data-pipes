@@ -207,7 +207,10 @@ public interface FhirEtlOptions extends BasePipelineOptions {
           + "Note this feature implies fetching Patient resources that were active in the given"
           + " period.\n"
           + "Default empty string disables this feature, i.e., all requested resources are"
-          + " fetched.")
+          + " fetched.\n"
+          + "Known limitation: the control panel's progress percentage does not account for the"
+          + " patient-history fetches this feature adds, so it may appear to approach 100% before"
+          + " the run actually finishes.")
   @Default.String("")
   String getActivePeriod();
 
