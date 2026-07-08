@@ -56,6 +56,11 @@ services:
   pipeline-controller:
     image: us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main:latest
     container_name: pipeline-controller
+    # Bound the controller's total memory so a pipeline run cannot OOM the host
+    # (the JVM heap defaults to 50% of this limit; RSS is roughly 2x heap, see
+    # https://github.com/google/fhir-data-pipes/issues/777). Increase for large
+    # datasets via PIPELINE_CONTROLLER_MEM_LIMIT together with JAVA_OPTS.
+    mem_limit: ${PIPELINE_CONTROLLER_MEM_LIMIT:-6g}
     volumes:
       - ${PIPELINE_CONFIG}:/app/config:ro
       - ${DWH_ROOT}:/dwh
