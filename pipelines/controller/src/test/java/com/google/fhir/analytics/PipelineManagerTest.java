@@ -117,34 +117,73 @@ public class PipelineManagerTest {
     assertThat(next, is(nullValue()));
   }
 
+  // NOTE: these tests guard the HELPER's behavior only (name filter, strict '<' cutoff, delete,
+  // missing-dir safety). They call the static method directly and would stay green even if both
+  // production call-sites were removed; the wiring is guarded by FlinkRpcJarStartupSweepTest
+  // (startup) and docker/validate_flink_tmp_jar_sweep.sh (post-run, on-demand).
   @Test
   public void testCleanStaleFlinkRpcJars(@TempDir Path tmpDir) throws Exception {
-    long cutoff = System.currentTimeMillis();
+    // Boundary jar: last-modified exactly equal to cutoff — must be PRESERVED. The comparison is
+    // strictly '<'; the post-run sweep passes cutoff = run start time, and on filesystems with
+    // second-granularity mtimes the live run's own jar can carry an mtime equal to that start.
+    // A regression to '<=' would delete a jar out from under a running MiniCluster. The cutoff is
+    // read back from the file (not taken from the clock) so mtime truncation cannot skew it.
+    Path boundary = tmpDir.resolve("flink-rpc-akka_boundary.jar");
+    Files.createFile(boundary);
+    assertThat(boundary.toFile().setLastModified(System.currentTimeMillis()), is(true));
+    long cutoff = boundary.toFile().lastModified();
 
-    // Stale jars (last-modified before cutoff) — should be deleted.
+    // Stale jars (last-modified strictly before cutoff) — must be deleted. These model the
+    // orphans left behind when a previous JVM was OOM-killed or restarted mid-run (MG-89).
     Path stale1 = tmpDir.resolve("flink-rpc-akka_aaa-111.jar");
     Path stale2 = tmpDir.resolve("flink-rpc-akka_bbb-222.jar");
     Files.createFile(stale1);
     Files.createFile(stale2);
-    stale1.toFile().setLastModified(cutoff - 2000);
-    stale2.toFile().setLastModified(cutoff - 1000);
+    assertThat(stale1.toFile().setLastModified(cutoff - 2000), is(true));
+    assertThat(stale2.toFile().setLastModified(cutoff - 1000), is(true));
 
-    // Current run's jar (last-modified after cutoff) — must be preserved.
+    // Newer than cutoff (the current run's jar) — must be preserved.
     Path current = tmpDir.resolve("flink-rpc-akka_current.jar");
     Files.createFile(current);
-    current.toFile().setLastModified(cutoff + 1000);
+    assertThat(current.toFile().setLastModified(cutoff + 1000), is(true));
 
-    // Unrelated file (name does not match pattern) — must not be deleted.
+    // Old file whose name does not match flink-rpc-akka*.jar — must be preserved.
     Path unrelated = tmpDir.resolve("other-flink-file.jar");
     Files.createFile(unrelated);
-    unrelated.toFile().setLastModified(cutoff - 1000);
+    assertThat(unrelated.toFile().setLastModified(cutoff - 1000), is(true));
 
-    int deleted = PipelineManager.cleanStaleFlinkRpcJars(tmpDir, cutoff);
+    PipelineManager.cleanStaleFlinkRpcJars(tmpDir, cutoff);
 
-    assertThat(deleted, is(2));
     assertThat(Files.exists(stale1), is(false));
     assertThat(Files.exists(stale2), is(false));
+    assertThat(Files.exists(boundary), is(true));
     assertThat(Files.exists(current), is(true));
     assertThat(Files.exists(unrelated), is(true));
+  }
+
+  @Test
+  public void testCleanStaleFlinkRpcJarsMissingDirIsNoOp(@TempDir Path tmpDir) {
+    // File.listFiles() returns null for a nonexistent directory. The helper is called from
+    // @PostConstruct and from the pipeline thread's finally block; throwing here would abort
+    // Spring startup or mask a pipeline failure, so it must degrade to a no-op.
+    PipelineManager.cleanStaleFlinkRpcJars(
+        tmpDir.resolve("does-not-exist"), System.currentTimeMillis());
+  }
+
+  @Test
+  public void testSweepStaleFlinkRpcJarsQuietlySwallowsBadTmpdir() {
+    // java.io.tmpdir is guaranteed non-null by the JVM, but Paths.get() can still throw for a
+    // malformed value (e.g. an embedded NUL character triggers InvalidPathException on every
+    // platform). Both call sites of this method (a @PostConstruct and a finally block) must never
+    // propagate an exception: one would abort Spring startup entirely, the other would mask an
+    // already-recorded run outcome. Reverting this method to call cleanStaleFlinkRpcJars directly
+    // (no try/catch) makes this test fail with an uncaught InvalidPathException.
+    String original = System.getProperty("java.io.tmpdir");
+    System.setProperty("java.io.tmpdir", "bad path");
+    try {
+      PipelineManager.sweepStaleFlinkRpcJarsQuietly(System.currentTimeMillis());
+    } finally {
+      System.setProperty("java.io.tmpdir", original);
+    }
   }
 }
