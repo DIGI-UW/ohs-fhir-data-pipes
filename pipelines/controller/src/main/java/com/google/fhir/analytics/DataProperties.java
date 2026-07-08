@@ -127,6 +127,13 @@ public class DataProperties {
 
   private boolean generateParquetFiles;
 
+  // Spring overwrites these initializers only when the property is explicitly configured.
+  private PipelineExecutionMode pipelineExecutionMode = PipelineExecutionMode.IN_PROCESS;
+
+  private String workerJavaOptions = "-XX:MaxRAMPercentage=50.0";
+
+  private String workerJarPath = "";
+
   @PostConstruct
   void validateProperties() {
     CronExpression.parse(incrementalSchedule);
@@ -282,7 +289,10 @@ public class DataProperties {
             ""),
         new ConfigFields("fhirdata.recursiveDepth", String.valueOf(recursiveDepth), "", ""),
         new ConfigFields(
-            "fhirdata.createParquetViews", String.valueOf(createParquetViews), "", ""));
+            "fhirdata.createParquetViews", String.valueOf(createParquetViews), "", ""),
+        new ConfigFields("fhirdata.pipelineExecutionMode", pipelineExecutionMode.name(), "", ""),
+        new ConfigFields("fhirdata.workerJavaOptions", workerJavaOptions, "", ""),
+        new ConfigFields("fhirdata.workerJarPath", workerJarPath, "", ""));
   }
 
   ConfigFields getConfigFields(FhirEtlOptions options, Method getMethod) {

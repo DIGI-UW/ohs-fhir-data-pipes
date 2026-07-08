@@ -22,8 +22,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.fhir.analytics.metrics.CumulativeMetrics;
-import com.google.fhir.analytics.metrics.PipelineMetrics;
-import com.google.fhir.analytics.metrics.PipelineMetricsProvider;
 import com.google.fhir.analytics.model.DatabaseConfiguration;
 import com.google.fhir.analytics.view.ViewDefinitionException;
 import io.micrometer.core.instrument.Gauge;
@@ -39,14 +37,13 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import lombok.Data;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.runners.flink.FlinkRunner;
-import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResolveOptions.StandardResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
@@ -157,6 +154,17 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
     }
   }
 
+  /**
+   * Publishes final pipeline counters (keyed as {@code <namespace>_<name>}) as actuator gauges.
+   * Used by {@link SubprocessPipelineExecutor}, whose counters come back from the worker's {@code
+   * result.json} rather than an in-JVM {@link MetricResults}.
+   */
+  void publishPipelineMetrics(Map<String, Long> counters) {
+    counters.forEach(
+        (name, value) ->
+            Gauge.builder(name, () -> value).strongReference(true).register(meterRegistry));
+  }
+
   void removePipelineMetrics() {
     meterRegistry
         .getMeters()
@@ -174,9 +182,7 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
     //  has two pipelines running one after the other, come up with a strategy to aggregate the
     //  metrics and generate the stats.
     if (isBatchRun() && isRunning()) {
-      PipelineMetrics pipelineMetrics =
-          PipelineMetricsProvider.getPipelineMetrics(currentPipeline.pipelineRunnerClass);
-      return pipelineMetrics != null ? pipelineMetrics.getCumulativeMetricsForOngoingBatch() : null;
+      return currentPipeline.executor.getProgress();
     }
     return null;
   }
@@ -429,6 +435,26 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
     }
   }
 
+  /** Builds the {@link PipelineExecutor} for the configured execution mode. */
+  PipelineExecutor createExecutor() {
+    if (dataProperties.getPipelineExecutionMode() == PipelineExecutionMode.SUBPROCESS) {
+      return new SubprocessPipelineExecutor(this, dataProperties);
+    }
+    return new InProcessPipelineExecutor(this, avroConversionUtil);
+  }
+
+  /**
+   * On graceful controller shutdown, stop any in-flight run. For SUBPROCESS mode this kills the
+   * child JVM so we do not leave a headless worker running after the control plane is gone.
+   */
+  @PreDestroy
+  void shutdown() {
+    if (currentPipeline != null && currentPipeline.isAlive()) {
+      logger.info("Controller shutting down; stopping in-flight pipeline run.");
+      currentPipeline.executor.stop();
+    }
+  }
+
   synchronized void runBatchPipeline(boolean isRecreateViews) {
     Preconditions.checkState(!isRunning(), "cannot start a pipeline while another one is running");
     Preconditions.checkState(
@@ -448,12 +474,7 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
     currentPipeline =
         new PipelineThread(
-            options,
-            this,
-            pipelineConfig,
-            isRecreateViews ? RunMode.VIEWS : RunMode.FULL,
-            avroConversionUtil,
-            FlinkRunner.class);
+            options, this, pipelineConfig, isRecreateViews ? RunMode.VIEWS : RunMode.FULL);
     if (isRecreateViews) {
       logger.info(
           "Running pipeline for recreating views from DWH {}", options.getParquetInputDwhRoot());
@@ -520,9 +541,7 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
       flinkOptionsForMerge.setParallelism(dataProperties.getNumThreads());
     }
     // Creating a thread for running both pipelines, one after the other.
-    currentPipeline =
-        new PipelineThread(
-            options, mergerOptions, this, pipelineConfig, avroConversionUtil, FlinkRunner.class);
+    currentPipeline = new PipelineThread(options, mergerOptions, this, pipelineConfig);
     logger.info("Running incremental pipeline for DWH {} since {}", currentDwh.getRoot(), since);
     currentPipeline.start();
   }
@@ -748,25 +767,22 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
 
     @Nullable private final RunMode runMode;
 
-    private AvroConversionUtil avroConversionUtil;
-
-    private Class<? extends PipelineRunner> pipelineRunnerClass;
+    // Runs the actual Beam stages, either in this JVM or in a child process depending on the
+    // configured execution mode. All other bookkeeping in run() is mode-independent.
+    private final PipelineExecutor executor;
 
     PipelineThread(
         FhirEtlOptions options,
         PipelineManager manager,
         PipelineConfig pipelineConfig,
-        @Nullable RunMode runMode,
-        AvroConversionUtil avroConversionUtil,
-        Class<? extends PipelineRunner> pipelineRunnerClass) {
+        @Nullable RunMode runMode) {
       Preconditions.checkArgument(options != null);
       this.options = options;
       this.manager = manager;
       this.pipelineConfig = pipelineConfig;
       this.runMode = runMode;
       this.mergerOptions = null;
-      this.avroConversionUtil = avroConversionUtil;
-      this.pipelineRunnerClass = pipelineRunnerClass;
+      this.executor = manager.createExecutor();
     }
 
     // The constructor for the incremental pipeline (hence the `mergerOptions`).
@@ -774,16 +790,13 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
         FhirEtlOptions options,
         ParquetMergerOptions mergerOptions,
         PipelineManager manager,
-        PipelineConfig pipelineConfig,
-        AvroConversionUtil avroConversionUtil,
-        Class<? extends PipelineRunner> pipelineRunnerClass) {
+        PipelineConfig pipelineConfig) {
       Preconditions.checkArgument(options != null);
       this.options = options;
       this.manager = manager;
       this.mergerOptions = mergerOptions;
       this.pipelineConfig = pipelineConfig;
-      this.avroConversionUtil = avroConversionUtil;
-      this.pipelineRunnerClass = pipelineRunnerClass;
+      this.executor = manager.createExecutor();
       this.runMode = RunMode.INCREMENTAL;
     }
 
@@ -802,19 +815,12 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
           currentDwhRoot = options.getParquetInputDwhRoot();
         }
 
-        List<Pipeline> pipelines = FhirEtl.setupAndBuildPipelines(options, avroConversionUtil);
-        if (pipelines == null || pipelines.isEmpty()) {
+        boolean workDone = executor.runEtl(options);
+        if (!workDone) {
           logger.warn("No resources found to be fetched!");
           manager.setLastRunStatus(LastRunStatus.SUCCESS);
           return;
         }
-
-        List<PipelineResult> pipelineResults =
-            EtlUtils.runMultiplePipelinesWithTimestamp(pipelines, options);
-        // Remove the metrics of the previous pipeline and register the new metrics
-        manager.removePipelineMetrics();
-        pipelineResults.forEach(
-            pipelineResult -> manager.publishPipelineMetrics(pipelineResult.metrics()));
         if (runMode == RunMode.VIEWS) {
           // Nothing more is needed to be done as we do not recreate a new DWH in this mode.
           // TODO record timing info and other details in this case.
@@ -824,13 +830,8 @@ public class PipelineManager implements ApplicationListener<ApplicationReadyEven
           manager.updateDwh(currentDwhRoot);
         } else {
           currentDwhRoot = mergerOptions.getMergedDwh();
-          List<Pipeline> mergerPipelines =
-              ParquetMerger.createMergerPipelines(mergerOptions, avroConversionUtil);
           logger.info("Merger options are {}", mergerOptions);
-          List<PipelineResult> mergerPipelineResults =
-              EtlUtils.runMultipleMergerPipelinesWithTimestamp(mergerPipelines, mergerOptions);
-          mergerPipelineResults.forEach(
-              pipelineResult -> manager.publishPipelineMetrics(pipelineResult.metrics()));
+          executor.runMerger(mergerOptions);
           manager.updateDwh(currentDwhRoot);
         }
         manager.createHiveTablesIfNeeded(
