@@ -149,8 +149,6 @@ public class FhirEtl {
     Map<String, List<SearchSegmentDescriptor>> segmentMap = Maps.newHashMap();
     try {
       // TODO in the activePeriod case, among patientAssociatedResources, only fetch Encounter here.
-      // TODO Capture the total resources to be processed as a metric which can be used to derive
-      //  the stats of how many records has been completed.
       segmentMap = fhirSearchUtil.createSegments(options);
     } catch (IllegalArgumentException e) {
       log.error(
@@ -161,6 +159,23 @@ public class FhirEtl {
     }
     if (segmentMap.isEmpty()) {
       return null;
+    }
+
+    // Seed the progress denominator with the server-reported totals gathered while creating the
+    // search segments; this mirrors the JDBC path and makes the control panel's percentage
+    // meaningful for FHIR_SEARCH runs.
+    // Known gap in activePeriod mode: fetchPatientHistory's FetchSearchPageFn instances increment
+    // the same numFetchedResources_/numMappedResources_ counters as the main segments above, but
+    // their resource counts are not included in this denominator (the total below only reflects
+    // createSegments' main-segment totals). The percentage can therefore approach 100% before the
+    // patient-history fetches finish. Not fixed here because activePeriod is an existing
+    // half-implemented feature (see the TODO on FhirEtlOptions#getActivePeriod) and isn't used by
+    // any current deployment; revisit if/when that feature gets a real implementation.
+    PipelineMetrics pipelineMetrics =
+        PipelineMetricsProvider.getPipelineMetrics(options.getRunner());
+    if (pipelineMetrics != null) {
+      pipelineMetrics.clearAllMetrics();
+      pipelineMetrics.setTotalNumOfResources(fhirSearchUtil.getTotalNumberOfResources());
     }
 
     Pipeline pipeline = Pipeline.create(options);
