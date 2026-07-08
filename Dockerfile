@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Copyright 2022 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +42,19 @@ ARG SKIP_TESTS=false
 
 # Updating license will fail in e2e and there is no point doing it here anyways.
 # Note this build can be faster by excluding some uber-jars we don't copy.
-RUN mvn --no-transfer-progress --batch-mode clean package -DskipTests=${SKIP_TESTS} -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
+#
+# The cache mount persists ~/.m2/repository across builds (BuildKit-only; CI already uses
+# docker/build-push-action which enables BuildKit by default). Without it, every build re-downloads
+# the entire dependency tree from scratch because the base maven image starts with an empty
+# repository and nothing in this Dockerfile was caching it before.
+#
+# sharing=locked: the default (shared) lets concurrent builds on the same BuildKit daemon write
+# into this mount at once, which can race and corrupt the Maven repository (e.g. two local
+# `docker build` runs, or a persistent/self-hosted CI runner building more than one branch at a
+# time). locked serializes concurrent access instead -- the second build waits for the first
+# rather than interleaving writes -- at no cost to the common non-concurrent case.
+RUN --mount=type=cache,target=/root/.m2/repository,sharing=locked \
+    mvn --no-transfer-progress --batch-mode clean package -DskipTests=${SKIP_TESTS} -Dlicense.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dspotless.apply.skip=true -T 2C
 
 FROM eclipse-temurin:17-jdk-focal as main
 
