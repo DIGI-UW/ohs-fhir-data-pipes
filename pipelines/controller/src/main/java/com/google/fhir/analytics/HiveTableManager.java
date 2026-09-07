@@ -105,10 +105,13 @@ public class HiveTableManager {
     String location =
         String.format("%s/%s/%s", THRIFT_CONTAINER_PARQUET_DIR, thriftServerParquetPath, resource);
     String tableName = String.format("%s_%s", resource, timestamp);
+    // Unqualified on purpose: `databaseName` from the Thrift-server config is already in the
+    // JDBC URL (DatabaseConfiguration#makeJdbsUrlFromConfig), so the session's current database
+    // is the configured one. Hardcoding `default.` here overrode that, sending every table and
+    // view to `default` no matter what the config said.
     String sql =
         String.format(
-            "CREATE TABLE IF NOT EXISTS default.%s USING PARQUET LOCATION '%s'",
-            tableName, location);
+            "CREATE TABLE IF NOT EXISTS %s USING PARQUET LOCATION '%s'", tableName, location);
     executeSql(connection, sql);
 
     // Instead of DROP and CREATE we use a VIEW for canonical tables such that the update happens
@@ -116,7 +119,7 @@ public class HiveTableManager {
     // own problems too, e.g., it does not seem to trigger parsing/changing schema.
     sql =
         String.format(
-            "CREATE OR REPLACE VIEW default.%s AS SELECT * FROM default.%s", resource, tableName);
+            "CREATE OR REPLACE VIEW %s AS SELECT * FROM %s", resource, tableName);
     executeSql(connection, sql);
   }
 
