@@ -69,7 +69,7 @@
           <!-- for code coverage -->
           <groupId>org.jacoco</groupId>
           <artifactId>jacoco-maven-plugin</artifactId>
-          <version>0.8.14</version>
+          <version>0.8.15</version>
           <executions>
             <execution>
               <goals>
@@ -197,7 +197,7 @@
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
-        <version>3.4.0</version>
+        <version>3.9.0</version>
         <configuration>
           <pom>
             <sortPom>
